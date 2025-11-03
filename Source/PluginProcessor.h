@@ -1,59 +1,63 @@
-/*
-  ==============================================================================
-
-    This file contains the basic framework code for a JUCE plugin processor.
-
-  ==============================================================================
-*/
+// PluginProcessor.h
+// Procesador principal de ChordCompanion: efecto MIDI VST3
 
 #pragma once
 
-#include <JuceHeader.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "Parameters.h"
+#include "Theory.h"
+#include "Utils.h"
+#include "ProgressionEngine.h"
 
-//==============================================================================
-/**
-*/
-class ChordCompanionAudioProcessor  : public juce::AudioProcessor
+class ChordCompanionAudioProcessor : public juce::AudioProcessor
 {
 public:
-    //==============================================================================
     ChordCompanionAudioProcessor();
     ~ChordCompanionAudioProcessor() override;
 
-    //==============================================================================
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    // JUCE AudioProcessor overrides
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
-   #ifndef JucePlugin_PreferredChannelConfigurations
-    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
-   #endif
-
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
-
-    //==============================================================================
     juce::AudioProcessorEditor* createEditor() override;
-    bool hasEditor() const override;
+    bool hasEditor() const override { return true; }
 
-    //==============================================================================
-    const juce::String getName() const override;
+    const juce::String getName() const override { return "ChordCompanion"; }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return true; }
+    bool isMidiEffect() const override { return true; }
+    double getTailLengthSeconds() const override { return 0.0; }
 
-    bool acceptsMidi() const override;
-    bool producesMidi() const override;
-    bool isMidiEffect() const override;
-    double getTailLengthSeconds() const override;
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
 
-    //==============================================================================
-    int getNumPrograms() override;
-    int getCurrentProgram() override;
-    void setCurrentProgram (int index) override;
-    const juce::String getProgramName (int index) override;
-    void changeProgramName (int index, const juce::String& newName) override;
+    void getStateInformation(juce::MemoryBlock& destData) override;
+    void setStateInformation(const void* data, int sizeInBytes) override;
 
-    //==============================================================================
-    void getStateInformation (juce::MemoryBlock& destData) override;
-    void setStateInformation (const void* data, int sizeInBytes) override;
+    // APVTS
+    juce::AudioProcessorValueTreeState apvts;
+    juce::UndoManager undo;
+
+    // Exportación (usado por Editor)
+    bool exportProgressionToMidiFile(const juce::File& dest);
+
+    // One-shot Generate desde Editor (opcional)
+    void triggerGenerateNow();
 
 private:
-    //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChordCompanionAudioProcessor)
+    cc::ProgressionEngine engine;
+
+    // Tracking de progresión en tiempo real
+    size_t currentDegreeIndex = 0;
+    std::vector<int> cachedDegrees; // cache de preset/custom
+
+    // Utilidad para leer posición del host (API moderna)
+    bool getHostInfo(juce::AudioPlayHead::PositionInfo& outInfo) const;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChordCompanionAudioProcessor)
 };

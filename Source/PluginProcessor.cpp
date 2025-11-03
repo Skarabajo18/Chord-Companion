@@ -1,190 +1,271 @@
-/*
-  ==============================================================================
-
-    This file contains the basic framework code for a JUCE plugin processor.
-
-  ==============================================================================
-*/
+// PluginProcessor.cpp
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+// Incluir .cpp directamente para asegurar que se compilan en este TU
+// (útil si el proyecto no ha sido re-exportado desde Projucer para añadir nuevos archivos)
+#include "Theory.cpp"
+#include "ProgressionEngine.cpp"
+#include "Utils.cpp"
 
-//==============================================================================
 ChordCompanionAudioProcessor::ChordCompanionAudioProcessor()
-#ifndef JucePlugin_PreferredChannelConfigurations
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
-#endif
+    : juce::AudioProcessor(BusesProperties()
+        .withInput("Input", juce::AudioChannelSet::stereo(), true)
+        .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, &undo, "PARAMS", cc::createParameterLayout())
 {
+    // Inicializar propiedad de texto para progressionCustom (no es parámetro estándar)
+    if (! apvts.state.hasProperty(cc::ParamID::progressionCustom))
+        apvts.state.setProperty(cc::ParamID::progressionCustom, juce::String("1-5-6-4"), nullptr);
+    // Inicializa propiedades de notas para la UI
+    if (! apvts.state.hasProperty(cc::ParamID::lastChordNotes))
+        apvts.state.setProperty(cc::ParamID::lastChordNotes, juce::String(), nullptr);
+    if (! apvts.state.hasProperty(cc::ParamID::sequenceNotes))
+        apvts.state.setProperty(cc::ParamID::sequenceNotes, juce::String(), nullptr);
 }
 
-ChordCompanionAudioProcessor::~ChordCompanionAudioProcessor()
-{
-}
+ChordCompanionAudioProcessor::~ChordCompanionAudioProcessor() = default;
 
-//==============================================================================
-const juce::String ChordCompanionAudioProcessor::getName() const
+void ChordCompanionAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
 {
-    return JucePlugin_Name;
-}
-
-bool ChordCompanionAudioProcessor::acceptsMidi() const
-{
-   #if JucePlugin_WantsMidiInput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool ChordCompanionAudioProcessor::producesMidi() const
-{
-   #if JucePlugin_ProducesMidiOutput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool ChordCompanionAudioProcessor::isMidiEffect() const
-{
-   #if JucePlugin_IsMidiEffect
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-double ChordCompanionAudioProcessor::getTailLengthSeconds() const
-{
-    return 0.0;
-}
-
-int ChordCompanionAudioProcessor::getNumPrograms()
-{
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
-}
-
-int ChordCompanionAudioProcessor::getCurrentProgram()
-{
-    return 0;
-}
-
-void ChordCompanionAudioProcessor::setCurrentProgram (int index)
-{
-}
-
-const juce::String ChordCompanionAudioProcessor::getProgramName (int index)
-{
-    return {};
-}
-
-void ChordCompanionAudioProcessor::changeProgramName (int index, const juce::String& newName)
-{
-}
-
-//==============================================================================
-void ChordCompanionAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    engine.prepare(sampleRate);
 }
 
 void ChordCompanionAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
 }
 
-#ifndef JucePlugin_PreferredChannelConfigurations
-bool ChordCompanionAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool ChordCompanionAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
+    // Permite cualquier combinación; el plugin ignora audio
+    juce::ignoreUnused(layouts);
     return true;
-  #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-   #endif
-
-    return true;
-  #endif
 }
-#endif
 
-void ChordCompanionAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+static float loadParam(const juce::AudioProcessorValueTreeState& apvts, const juce::String& id)
 {
-    juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    if (auto* p = apvts.getRawParameterValue(id))
+        return p->load();
+    return 0.0f;
+}
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+static int loadIntParam(const juce::AudioProcessorValueTreeState& apvts, const juce::String& id)
+{
+    return (int) std::lrintf(loadParam(apvts, id));
+}
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+static bool loadBoolParam(const juce::AudioProcessorValueTreeState& apvts, const juce::String& id)
+{
+    return loadParam(apvts, id) >= 0.5f;
+}
+
+static std::vector<int> getDegreesFromParameters(const juce::AudioProcessorValueTreeState& apvts)
+{
+    const int presetIdx = loadIntParam(apvts, cc::ParamID::progressionPreset);
+    const juce::String customStr = apvts.state.getProperty(cc::ParamID::progressionCustom, juce::String("1-5-6-4")).toString();
+    const auto preset = (cc::ProgressionPreset) presetIdx;
+    if (preset == cc::ProgressionPreset::Custom)
+        return cc::parseProgressionString(customStr);
+    switch (preset)
     {
-        auto* channelData = buffer.getWritePointer (channel);
-
-        // ..do something to the data...
+        case cc::ProgressionPreset::I_V_vi_IV: return {1,5,6,4};
+        case cc::ProgressionPreset::ii_V_I:    return {2,5,1};
+        case cc::ProgressionPreset::I_vi_IV_V: return {1,6,4,5};
+        case cc::ProgressionPreset::vi_IV_I_V: return {6,4,1,5};
+        default: return {1,5,6,4};
     }
 }
 
-//==============================================================================
-bool ChordCompanionAudioProcessor::hasEditor() const
+void ChordCompanionAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    juce::ScopedNoDenormals noDenormals;
+
+    // Este plugin no produce audio: limpia el buffer
+    buffer.clear();
+
+    // One-shot generate/Export mediante flags APVTS
+    {
+        auto* genParam = apvts.getParameter(cc::ParamID::generateNow);
+        if (genParam && genParam->getValue() > 0.5f)
+        {
+            // Construir cola y también preparar resumen de notas
+            engine.buildQueueFromParameters(apvts);
+
+            // Crear resumen de la secuencia
+            auto degrees = getDegreesFromParameters(apvts);
+            const int keyIdx     = loadIntParam(apvts, cc::ParamID::key);
+            const int scaleIdx   = loadIntParam(apvts, cc::ParamID::scale);
+            const int qualityIdx = loadIntParam(apvts, cc::ParamID::chordQuality);
+            const bool add7  = loadBoolParam(apvts, cc::ParamID::add7);
+            const bool add9  = loadBoolParam(apvts, cc::ParamID::add9);
+            const bool add11 = loadBoolParam(apvts, cc::ParamID::add11);
+            const bool add13 = loadBoolParam(apvts, cc::ParamID::add13);
+            const int inversion    = loadIntParam(apvts, cc::ParamID::inversion);
+            const int octave       = loadIntParam(apvts, cc::ParamID::octave);
+
+            const auto scale      = (cc::ScaleType) scaleIdx;
+            const auto quality    = (cc::ChordQuality) qualityIdx;
+            const int keySemitone = keyIdx;
+            cc::ExtensionToggles togg { add7, add9, add11, add13 };
+
+            juce::StringArray chordStrings;
+            for (int deg : degrees)
+            {
+                const int root = cc::degreeToMidi(deg, keySemitone, scale, octave);
+                auto notes = cc::makeChordNotes(root, scale, quality, inversion, togg);
+                chordStrings.add("[" + cc::notesToString(notes) + "]");
+            }
+            apvts.state.setProperty(cc::ParamID::sequenceNotes, chordStrings.joinIntoString(" | "), nullptr);
+            engine.startPlayback();
+            genParam->beginChangeGesture();
+            genParam->setValueNotifyingHost(0.0f);
+            genParam->endChangeGesture();
+        }
+
+        auto* expParam = apvts.getParameter(cc::ParamID::exportMidi);
+        if (expParam && expParam->getValue() > 0.5f)
+        {
+            // El editor abrirá el FileChooser; aquí solo reseteamos el flag tras exportar
+            // (Export real se realiza en el editor para interactuar con la UI)
+        }
+    }
+
+    // Reproducir cola generada si aplica
+    engine.injectQueuedEvents(midi, buffer.getNumSamples());
+
+    // Manejo en tiempo real: intercepta NoteOn entrante y genera acorde del grado activo
+    // Avanza el índice de grado por barra o por longitud si no hay reloj
+    juce::AudioPlayHead::PositionInfo pos;
+    const bool hasHost = getHostInfo(pos);
+    // BPM disponible en pos si el host lo proporciona (no usado aquí)
+    const int noteLengthMs = loadIntParam(apvts, cc::ParamID::noteLengthMs);
+    const bool followHost = loadBoolParam(apvts, cc::ParamID::followHost);
+
+    const int blocksamples = buffer.getNumSamples();
+
+    // Cachear grados para RT
+    cachedDegrees = getDegreesFromParameters(apvts);
+    if (cachedDegrees.empty())
+        cachedDegrees = {1,5,6,4};
+
+    const int keyIdx     = loadIntParam(apvts, cc::ParamID::key);
+    const int scaleIdx   = loadIntParam(apvts, cc::ParamID::scale);
+    const int qualityIdx = loadIntParam(apvts, cc::ParamID::chordQuality);
+    const bool add7  = loadBoolParam(apvts, cc::ParamID::add7);
+    const bool add9  = loadBoolParam(apvts, cc::ParamID::add9);
+    const bool add11 = loadBoolParam(apvts, cc::ParamID::add11);
+    const bool add13 = loadBoolParam(apvts, cc::ParamID::add13);
+    const int inversion    = loadIntParam(apvts, cc::ParamID::inversion);
+    const int velocity     = loadIntParam(apvts, cc::ParamID::velocity);
+    const int humanizeMs   = loadIntParam(apvts, cc::ParamID::humanizeMs);
+    const int humanizeVel  = loadIntParam(apvts, cc::ParamID::humanizeVel);
+    const int octave       = loadIntParam(apvts, cc::ParamID::octave);
+
+    const auto scale      = (cc::ScaleType) scaleIdx;
+    const auto quality    = (cc::ChordQuality) qualityIdx;
+    const int keySemitone = keyIdx;
+    cc::ExtensionToggles togg { add7, add9, add11, add13 };
+
+    juce::Random rng;
+
+    // Determinar avance de grado cuando no hay reloj
+    const int lenSamples = cc::msToSamples(getSampleRate(), noteLengthMs);
+    static int samplesUntilAdvance = 0;
+    samplesUntilAdvance -= blocksamples;
+    if (samplesUntilAdvance <= 0)
+    {
+        if (!followHost || !hasHost)
+        {
+            currentDegreeIndex = (currentDegreeIndex + 1) % cachedDegrees.size();
+            samplesUntilAdvance = lenSamples;
+        }
+        else
+        {
+            // Si followHost: avanzará por barra/negra según DAW (simplificado aquí)
+            currentDegreeIndex = (currentDegreeIndex + 1) % cachedDegrees.size();
+            samplesUntilAdvance = lenSamples; // aproximación a negra
+        }
+    }
+
+    // Iterar mensajes entrantes, generar acordes y preservar otros
+    juce::MidiBuffer output;
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        const int samplePos = meta.samplePosition;
+        if (msg.isNoteOn())
+        {
+            const int degree = cachedDegrees[currentDegreeIndex];
+            const int root = cc::degreeToMidi(degree, keySemitone, scale, octave);
+            auto notes = cc::makeChordNotes(root, scale, quality, inversion, togg);
+            // Publicar notas actuales para la UI
+            apvts.state.setProperty(cc::ParamID::lastChordNotes, cc::notesToString(notes), nullptr);
+            for (int n : notes)
+            {
+                const int vel = cc::humanizeVelocity(velocity, humanizeVel, rng);
+                const int hOn = cc::humanizeMsToSamples(getSampleRate(), humanizeMs, rng);
+                const int hOff= cc::humanizeMsToSamples(getSampleRate(), humanizeMs, rng);
+
+                output.addEvent(juce::MidiMessage::noteOn(1, n, (juce::uint8) vel), juce::jmax(0, samplePos + hOn));
+                output.addEvent(juce::MidiMessage::noteOff(1, n), juce::jmax(0, samplePos + hOn + lenSamples + hOff));
+            }
+        }
+        else
+        {
+            // Preservar clock/CC/otros
+            output.addEvent(msg, samplePos);
+        }
+    }
+
+    midi.swapWith(output);
+}
+
+bool ChordCompanionAudioProcessor::getHostInfo(juce::AudioPlayHead::PositionInfo& outInfo) const
+{
+    if (auto* ph = getPlayHead())
+    {
+        if (auto pos = ph->getPosition())
+        {
+            outInfo = *pos;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ChordCompanionAudioProcessor::exportProgressionToMidiFile(const juce::File& dest)
+{
+    // Algunas versiones de JUCE no exponen BPM en PositionInfo; usamos 120 por defecto.
+    double bpm = 120.0;
+    return engine.exportProgressionToMidiFile(apvts, dest, bpm);
+}
+
+void ChordCompanionAudioProcessor::triggerGenerateNow()
+{
+    engine.buildQueueFromParameters(apvts);
+    engine.startPlayback();
+}
+
+void ChordCompanionAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
+}
+
+void ChordCompanionAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+    if (xml.get() != nullptr && xml->hasTagName(apvts.state.getType()))
+        apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
 juce::AudioProcessorEditor* ChordCompanionAudioProcessor::createEditor()
 {
-    return new ChordCompanionAudioProcessorEditor (*this);
+    return new ChordCompanionAudioProcessorEditor(*this);
 }
 
-//==============================================================================
-void ChordCompanionAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-}
-
-void ChordCompanionAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-}
-
-//==============================================================================
-// This creates new instances of the plugin..
+// Fábrica requerida por JUCE para crear la instancia del procesador
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new ChordCompanionAudioProcessor();
